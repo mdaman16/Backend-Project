@@ -1,9 +1,49 @@
 from fastapi import FastAPI, HTTPException
 import asyncpg
+from pydantic import BaseModel, Field
+from typing import List
 
 app = FastAPI()
 
 # -------------------- DB CONNECTION --------------------
+
+class ProductCreate(BaseModel):
+    productName: str
+    productType: str
+    unit: str
+    supplierName: str
+    costPrice: float
+    sellingPrice: float
+    taxCategory: str
+    currentStock: float
+    reorderLevel: float
+
+class ProductResponse(BaseModel):
+    productId: str
+    productName: str
+    productType: str
+    unit: str
+    supplierName: str
+    costPrice: float
+    sellingPrice: float
+    taxCategory: str
+    currentStock: float
+    reorderLevel: float
+    marginValue: float
+    marginPercent: float
+    inventoryValue: float
+    stockStatus: str
+
+class ProductListResponse(BaseModel):
+    success: bool
+    message: str
+    data: List[ProductResponse]
+
+
+class ProductCreateResponse(BaseModel):
+    success: bool
+    message: str
+    data: ProductResponse
 
 DB_CONFIG = {
     "user": "postgres",
@@ -69,23 +109,7 @@ async def get_inventory():
     result = await execute_query(query, fetch=True)
     return [dict(r) for r in result]
 
-# -------------------- PRODUCT APIs --------------------
 
-@app.post("/products")
-async def create_product(name: str, batch_size: float):
-    query = """
-    INSERT INTO products (name, batch_size)
-    VALUES ($1, $2)
-    RETURNING *
-    """
-    result = await execute_query(query, name, batch_size, fetch=True)
-    return dict(result[0])
-
-@app.get("/products")
-async def get_products():
-    query = "SELECT * FROM products"
-    result = await execute_query(query, fetch=True)
-    return [dict(r) for r in result]
 
 # -------------------- SALES APIs --------------------
 
@@ -115,3 +139,137 @@ async def dashboard():
     query = "SELECT COALESCE(SUM(final_total),0) as total_sales, COUNT(*) as total_orders FROM sales_orders"
     result = await execute_query(query, fetch=True)
     return dict(result[0])
+
+
+from fastapi import HTTPException
+import uuid
+
+# -------------------- HELPER --------------------
+
+def generate_product_id():
+    return f"PRD-{str(uuid.uuid4().int)[:3]}"
+
+
+def calculate_fields(cost_price, selling_price, current_stock, reorder_level):
+    margin_value = selling_price - cost_price
+    margin_percent = (margin_value / selling_price) * 100 if selling_price else 0
+    inventory_value = current_stock * cost_price
+
+    if current_stock <= reorder_level:
+        stock_status = "Low"
+    elif current_stock > reorder_level * 2:
+        stock_status = "High"
+    else:
+        stock_status = "Medium"
+
+    return margin_value, margin_percent, inventory_value, stock_status
+
+
+# -------------------- CREATE PRODUCT --------------------
+
+@app.post("/api/v1/products", response_model=ProductCreateResponse)
+async def create_product(payload: ProductCreate):
+
+    product_id = generate_product_id()
+
+    query = """
+    INSERT INTO products (
+        product_id, product_name, product_type, unit,
+        supplier_name, cost_price, selling_price,
+        tax_category, current_stock, reorder_level
+    )
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+    RETURNING *
+    """
+
+    result = await execute_query(
+        query,
+        product_id,
+        payload.productName,
+        payload.productType,
+        payload.unit,
+        payload.supplierName,
+        payload.costPrice,
+        payload.sellingPrice,
+        payload.taxCategory,
+        payload.currentStock,
+        payload.reorderLevel,
+        fetch=True
+    )
+
+    if not result:
+        raise HTTPException(status_code=500, detail="Insert failed")
+
+    product = dict(result[0])
+
+    margin_value, margin_percent, inventory_value, stock_status = calculate_fields(
+        product["cost_price"],
+        product["selling_price"],
+        product["current_stock"],
+        product["reorder_level"]
+    )
+
+    return {
+        "success": True,
+        "message": "Product created successfully.",
+        "data": {
+            "productId": product["product_id"],
+            "productName": product["product_name"],
+            "productType": product["product_type"],
+            "unit": product["unit"],
+            "supplierName": product["supplier_name"],
+            "costPrice": float(product["cost_price"]),
+            "sellingPrice": float(product["selling_price"]),
+            "taxCategory": product["tax_category"],
+            "currentStock": float(product["current_stock"]),
+            "reorderLevel": float(product["reorder_level"]),
+            "marginValue": round(margin_value, 2),
+            "marginPercent": round(margin_percent, 2),
+            "inventoryValue": round(inventory_value, 2),
+            "stockStatus": stock_status
+        }
+    }
+
+
+# -------------------- GET PRODUCTS --------------------
+
+@app.get("/api/v1/products", response_model=ProductListResponse)
+async def get_products():
+
+    query = "SELECT * FROM products ORDER BY created_at DESC"
+    result = await execute_query(query, fetch=True)
+
+    data = []
+
+    for r in result:
+        product = dict(r)
+
+        margin_value, margin_percent, inventory_value, stock_status = calculate_fields(
+            product["cost_price"],
+            product["selling_price"],
+            product["current_stock"],
+            product["reorder_level"]
+        )
+
+        data.append({
+            "productId": product["product_id"],
+            "productName": product["product_name"],
+            "productType": product["product_type"],
+            "unit": product["unit"],
+            "supplierName": product["supplier_name"],
+            "costPrice": float(product["cost_price"]),
+            "sellingPrice": float(product["selling_price"]),
+            "taxCategory": product["tax_category"],
+            "currentStock": float(product["current_stock"]),
+            "reorderLevel": float(product["reorder_level"]),
+            "marginValue": round(margin_value, 2),
+            "marginPercent": round(margin_percent, 2),
+            "inventoryValue": round(inventory_value, 2),
+            "stockStatus": stock_status
+        })
+
+    return {
+        "success": True,
+        "message": "Products fetched successfully.",
+        "data": data
+    }
